@@ -142,9 +142,22 @@ create_directories() {
              "$SCREENSHOT_DIR" "$STATE_DIR" "$TMP_DIR" "$REPO_DIR"; do
     with_sudo mkdir -p "$dir"
   done
-  with_sudo chmod -R 775 "$BASE_DIR"
   with_sudo chown -R "${CURRENT_USER}:${CURRENT_GROUP}" "$BASE_DIR"
+  for dir in "$BASE_DIR" "$APP_DIR" "$LOG_DIR" "$SCREENSHOT_DIR" "$STATE_DIR" "$BIN_DIR" "$TMP_DIR" "$REPO_DIR"; do
+    if [ -d "$dir" ]; then
+      with_sudo chmod 750 "$dir"
+    fi
+  done
+  if [ -d "$CONFIG_DIR" ]; then
+    with_sudo chmod 700 "$CONFIG_DIR"
+  fi
   with_sudo mkdir -p "${STATE_DIR}/whatsapp"
+  if [ -d "$STATE_DIR" ]; then
+    with_sudo chmod 700 "$STATE_DIR"
+  fi
+  if [ -d "${STATE_DIR}/whatsapp" ]; then
+    with_sudo chmod 700 "${STATE_DIR}/whatsapp"
+  fi
 }
 
 materialize_env_file() {
@@ -167,7 +180,8 @@ DEFAULT_DRY_RUN=false
 ENVIRONMENT=production
 ENV
   fi
-  with_sudo chmod 660 "$ENV_FILE"
+  with_sudo chmod 600 "$ENV_FILE"
+  with_sudo chown "${CURRENT_USER}:${CURRENT_GROUP}" "$ENV_FILE"
 }
 
 materialize_google_placeholder() {
@@ -186,7 +200,8 @@ materialize_google_placeholder() {
 }
 JSON
   fi
-  with_sudo chmod 660 "$SERVICE_ACCOUNT_FILE"
+  with_sudo chmod 600 "$SERVICE_ACCOUNT_FILE"
+  with_sudo chown "${CURRENT_USER}:${CURRENT_GROUP}" "$SERVICE_ACCOUNT_FILE"
 }
 
 set_env_var() {
@@ -199,6 +214,8 @@ set_env_var() {
   else
     echo "${key}=${value}" | with_sudo tee -a "$ENV_FILE" >/dev/null
   fi
+  with_sudo chmod 600 "$ENV_FILE"
+  with_sudo chown "${CURRENT_USER}:${CURRENT_GROUP}" "$ENV_FILE"
 }
 
 get_env_var() {
@@ -421,44 +438,43 @@ def open_eventos_em_andamento(page: Page) -> None:
 
 
 def extract_in_progress_count(page: Page) -> int:
-    locator = page.locator("xpath=//span[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'em andamento')]/following-sibling::span")
     try:
-        if locator.count():
-            value = locator.first.inner_text().strip()
-            return int("".join([c for c in value if c.isdigit()]))
+        node = page.locator("css=.menus .item-selected > span:last-child span").first
+        text = node.inner_text().strip()
+        return int("".join(c for c in text if c.isdigit()))
     except Exception:
         pass
-    fallback = page.locator("xpath=//span[contains(text(),'Em andamento')]")
-    if fallback.count():
-        text = fallback.first.inner_text()
-        digits = "".join([c for c in text if c.isdigit()])
-        if digits:
-            return int(digits)
-    return 0
+    try:
+        block = page.locator("css=.menus .item-selected").first.inner_text()
+        digits = "".join(c for c in block if c.isdigit())
+        return int(digits) if digits else 0
+    except Exception:
+        return 0
 
 
-def scroll_collect_event_links(page: Page) -> List[str]:
+def scroll_collect_event_links(page: Page, expected: Optional[int] = None) -> List[str]:
     logging.info("Coletando eventos em andamento...")
     collected: List[str] = []
     previous_len = -1
-    stable_iterations = 0
-    for _ in range(60):
+    stable = 0
+    for _ in range(120):
         links = page.locator("a.item[href*='/gestao_eventos/view2/']")
-        hrefs = [link.get_attribute("href") for link in links.element_handles()]
-        hrefs = [h for h in hrefs if h]
-        for href in hrefs:
-            if href not in collected:
-                collected.append(href)
-        if len(collected) == previous_len:
-            stable_iterations += 1
-        else:
-            stable_iterations = 0
-        previous_len = len(collected)
-        if stable_iterations >= 3:
+        hrefs = [h for h in [el.get_attribute("href") for el in links.element_handles()] if h]
+        for h in hrefs:
+            if h not in collected:
+                collected.append(h)
+        if expected and len(collected) >= expected:
             break
-        page.mouse.wheel(0, 2000)
-        wait_safe(page, 1)
-    logging.info("Total de eventos encontrados: %s", len(collected))
+        page.mouse.wheel(0, 2200)
+        wait_safe(page, 0.8)
+        if len(collected) == previous_len:
+            stable += 1
+            if stable >= 5:
+                break
+        else:
+            stable = 0
+        previous_len = len(collected)
+    logging.info("Eventos coletados: %s (esperado: %s)", len(collected), expected)
     return collected
 
 
@@ -541,16 +557,24 @@ def handle_whatsapp_flow(target_url: Optional[str], manager: BrowserManager, hea
     wait_safe(w_page, 10)
     sent = False
     selectors = [
+        "xpath=//span[@aria-hidden='true' and @data-icon='wds-ic-send-filled']",
         "[data-testid='compose-btn-send']",
-        "button[data-testid='wds-ic-send-filled']",
         "button[aria-label='Enviar']",
         "span[data-icon='send']",
     ]
     for selector in selectors:
         try:
-            w_page.locator(selector).first.click()
-            sent = True
-            break
+            tgt = w_page.locator(selector).first
+            if tgt.count():
+                try:
+                    tgt.click()
+                except Exception:
+                    try:
+                        w_page.evaluate("el => el.closest('button')?.click()", tgt.element_handle())
+                    except Exception:
+                        pass
+                sent = True
+                break
         except Exception:
             continue
     if not sent:
@@ -639,6 +663,7 @@ def send_whatsapp_for_row(page: Page, row_index: int, manager: BrowserManager, h
 
 
 def process_table(page: Page, manager: BrowserManager, headless: bool, dry_run: bool) -> bool:
+    page.wait_for_selector("table.table.table-hover tbody tr", timeout=15000)
     rows = page.locator("table.table.table-hover tbody tr")
     total = rows.count()
     logging.info("Total de linhas encontradas: %s", total)
@@ -729,7 +754,7 @@ def run_flow(args: argparse.Namespace, config: AppConfig, log_path: Path) -> Non
         login_assessoria_vip(page, config)
         open_eventos_em_andamento(page)
         expected = extract_in_progress_count(page)
-        events = scroll_collect_event_links(page)
+        events = scroll_collect_event_links(page, expected=expected if expected > 0 else None)
         if expected and expected != len(events):
             logging.warning("Número esperado (%s) diferente do coletado (%s)", expected, len(events))
         if args.event_id:
@@ -794,7 +819,9 @@ materialize_assets() {
 deploy_self() {
   with_sudo mkdir -p "$BIN_DIR"
   local target="$BIN_DIR/jojo-guest.sh"
-  with_sudo cp "$0" "$target"
+  local tmp="${target}.new"
+  with_sudo cp "$0" "$tmp"
+  with_sudo mv -f "$tmp" "$target"
   with_sudo chmod 775 "$target"
 }
 
@@ -821,7 +848,27 @@ clone_repo() {
 
 ensure_permissions() {
   with_sudo chown -R "${CURRENT_USER}:${CURRENT_GROUP}" "$BASE_DIR"
-  with_sudo chmod -R 775 "$BASE_DIR"
+  local dirs_750=("$BASE_DIR" "$BIN_DIR" "$APP_DIR" "$LOG_DIR" "$SCREENSHOT_DIR" "$TMP_DIR" "$REPO_DIR")
+  for dir in "${dirs_750[@]}"; do
+    if [ -d "$dir" ]; then
+      with_sudo chmod 750 "$dir"
+    fi
+  done
+  if [ -d "$CONFIG_DIR" ]; then
+    with_sudo chmod 700 "$CONFIG_DIR"
+  fi
+  if [ -d "$STATE_DIR" ]; then
+    with_sudo chmod 700 "$STATE_DIR"
+  fi
+  if [ -d "${STATE_DIR}/whatsapp" ]; then
+    with_sudo chmod 700 "${STATE_DIR}/whatsapp"
+  fi
+  for file in "$ENV_FILE" "$SERVICE_ACCOUNT_FILE"; do
+    if [ -f "$file" ]; then
+      with_sudo chmod 600 "$file"
+      with_sudo chown "${CURRENT_USER}:${CURRENT_GROUP}" "$file"
+    fi
+  done
 }
 
 install_all() {
@@ -839,7 +886,6 @@ update_all() {
   echo "${COLOR_PRIMARY}${STYLE_BOLD}Atualizando instalação do Jojô Guest...${STYLE_RESET}"
   create_directories
   with_sudo rm -rf "${APP_DIR}"/*
-  with_sudo rm -rf "${BIN_DIR}"/*
   materialize_assets
   deploy_self
   install_python_dependencies
@@ -855,8 +901,9 @@ uninstall_all() {
     echo "${COLOR_WARNING}Ação cancelada.${STYLE_RESET}"
     return
   fi
+  [ "$BASE_DIR" = "/opt/jojo-guest" ] || { echo "BASE_DIR inesperado! Abortando." >&2; return; }
   with_sudo rm -rf "$BASE_DIR"
-  crontab -l 2>/dev/null | grep -v "# jojo-guest" | crontab - 2>/dev/null || true
+  cron_remove
   echo "${COLOR_SECONDARY}${STYLE_BOLD}Jojô Guest removido com sucesso.${STYLE_RESET}"
 }
 
@@ -896,7 +943,8 @@ configure_google() {
     read -rp "Caminho do arquivo JSON: " json_path
     if [ -f "$json_path" ]; then
       with_sudo cp "$json_path" "$SERVICE_ACCOUNT_FILE"
-      with_sudo chmod 660 "$SERVICE_ACCOUNT_FILE"
+      with_sudo chmod 600 "$SERVICE_ACCOUNT_FILE"
+      with_sudo chown "${CURRENT_USER}:${CURRENT_GROUP}" "$SERVICE_ACCOUNT_FILE"
       echo "${COLOR_SECONDARY}Service Account atualizada.${STYLE_RESET}"
     else
       echo "${COLOR_ERROR}Arquivo não encontrado.${STYLE_RESET}"
@@ -1085,19 +1133,14 @@ cron_list() {
 }
 
 cron_remove() {
-  local entries
-  mapfile -t entries < <(crontab -l 2>/dev/null)
-  if [ "${#entries[@]}" -eq 0 ]; then
-    echo "Nenhum cron configurado."
-    return
+  local tmp; tmp="$(mktemp)"
+  crontab -l 2>/dev/null | grep -v "# jojo-guest" > "$tmp" || true
+  if [ -s "$tmp" ]; then
+    crontab "$tmp"
+  else
+    crontab -r 2>/dev/null || true
   fi
-  local filtered=()
-  for line in "${entries[@]}"; do
-    if [[ "$line" != *"# jojo-guest"* ]]; then
-      filtered+=("$line")
-    fi
-  done
-  printf "%s\n" "${filtered[@]}" | crontab - 2>/dev/null || crontab -r 2>/dev/null || true
+  rm -f "$tmp"
   echo "Todos os agendamentos do Jojô Guest foram removidos."
 }
 
