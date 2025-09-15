@@ -1,0 +1,20 @@
+# Artefatos Python
+__pycache__/
+*.py[cod]
+
+# Diretórios gerados durante a instalação/execução
+app/
+bin/
+logs/
+repo/
+screenshots/
+state/
+tmp/
+
+# Configurações sensíveis produzidas pelo instalador
+config/*
+!config/README.md
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
